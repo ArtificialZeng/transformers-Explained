@@ -102,69 +102,61 @@ def get_masks(slen, lengths, causal, padding_mask=None):
 
 
 class MultiHeadAttention(nn.Module):
-    NEW_ID = itertools.count()
+    NEW_ID = itertools.count()  # 使用itertools.count()创建一个无限递增的计数器，为每个注意力层生成一个唯一的ID。
 
     def __init__(self, n_heads, dim, config):
-        super().__init__()
-        self.layer_id = next(MultiHeadAttention.NEW_ID)
-        self.dim = dim
-        self.n_heads = n_heads
-        self.dropout = config.attention_dropout
-        assert self.dim % self.n_heads == 0
-
-        self.q_lin = nn.Linear(dim, dim)
-        self.k_lin = nn.Linear(dim, dim)
-        self.v_lin = nn.Linear(dim, dim)
-        self.out_lin = nn.Linear(dim, dim)
-        self.pruned_heads = set()
+        super().__init__()  # 调用父类的初始化方法。
+        self.layer_id = next(MultiHeadAttention.NEW_ID)  # 为当前注意力层分配一个唯一的ID。
+        self.dim = dim  # 初始化内部变量。
+        self.n_heads = n_heads  # 初始化内部变量。
+        self.dropout = config.attention_dropout  # 初始化内部变量。
+        assert self.dim % self.n_heads == 0  # 断言维度可以被注意力头的数量整除。
+        self.q_lin = nn.Linear(dim, dim)  # 初始化四个线性层，分别用于注意力机制的 Query、Key、Value 以及输出。
+        self.k_lin = nn.Linear(dim, dim)  
+        self.v_lin = nn.Linear(dim, dim)  
+        self.out_lin = nn.Linear(dim, dim)  
+        self.pruned_heads = set()  # 初始化一个集合用于存储已经被剪枝的注意力头。
 
     def prune_heads(self, heads):
-        attention_head_size = self.dim // self.n_heads
+        attention_head_size = self.dim // self.n_heads  
         if len(heads) == 0:
             return
         heads, index = find_pruneable_heads_and_indices(heads, self.n_heads, attention_head_size, self.pruned_heads)
-        # Prune linear layers
-        self.q_lin = prune_linear_layer(self.q_lin, index)
-        self.k_lin = prune_linear_layer(self.k_lin, index)
-        self.v_lin = prune_linear_layer(self.v_lin, index)
-        self.out_lin = prune_linear_layer(self.out_lin, index, dim=1)
-        # Update hyper params
-        self.n_heads = self.n_heads - len(heads)
-        self.dim = attention_head_size * self.n_heads
-        self.pruned_heads = self.pruned_heads.union(heads)
+        # 在此方法中，它找到了要剪枝的头部和相关的索引，并对四个线性层进行了剪枝。然后更新了模型参数。
+        self.q_lin = prune_linear_layer(self.q_lin, index)  
+        self.k_lin = prune_linear_layer(self.k_lin, index)  
+        self.v_lin = prune_linear_layer(self.v_lin, index)  
+        self.out_lin = prune_linear_layer(self.out_lin, index, dim=1)  
+        self.n_heads = self.n_heads - len(heads)  
+        self.dim = attention_head_size * self.n_heads  
+        self.pruned_heads = self.pruned_heads.union(heads)  
 
     def forward(self, input, mask, kv=None, cache=None, head_mask=None, output_attentions=False):
-        """
-        Self-attention (if kv is None) or attention over source sentence (provided by kv).
-        """
-        # Input is (bs, qlen, dim)
-        # Mask is (bs, klen) (non-causal) or (bs, klen, klen)
-        bs, qlen, dim = input.size()
+        bs, qlen, dim = input.size()  # 提取输入的形状和相关参数。
         if kv is None:
             klen = qlen if cache is None else cache["slen"] + qlen
         else:
             klen = kv.size(1)
-        # assert dim == self.dim, f'Dimensions do not match: {dim} input vs {self.dim} configured'
-        n_heads = self.n_heads
-        dim_per_head = self.dim // n_heads
-        mask_reshape = (bs, 1, qlen, klen) if mask.dim() == 3 else (bs, 1, 1, klen)
+        n_heads = self.n_heads  # 计算每个注意力头的维度。
+        dim_per_head = self.dim // n_heads  # 计算每个注意力头的维度。
+        mask_reshape = (bs, 1, qlen, klen) if mask.dim() == 3 else (bs, 1, 1, klen)  # 根据遮罩的维度重新塑形，以适应多头注意力的计算。
 
         def shape(x):
             """projection"""
-            return x.view(bs, -1, self.n_heads, dim_per_head).transpose(1, 2)
+            return x.view(bs, -1, self.n_heads, dim_per_head).transpose(1, 2)  # 定义shape函数，用于改变输入的形状，从而适应多头注意力的计算。
 
         def unshape(x):
             """compute context"""
-            return x.transpose(1, 2).contiguous().view(bs, -1, self.n_heads * dim_per_head)
+            return x.transpose(1, 2).contiguous().view(bs, -1, self.n_heads * dim_per_head)  # 定义unshape函数，用于改变输入的形状，从而适应多头注意力的计算。
 
-        q = shape(self.q_lin(input))  # (bs, n_heads, qlen, dim_per_head)
+        q = shape(self.q_lin(input))  # 根据输入和可选的 kv 值，为 Query、Key 和 Value 计算对应的变换。
         if kv is None:
-            k = shape(self.k_lin(input))  # (bs, n_heads, qlen, dim_per_head)
-            v = shape(self.v_lin(input))  # (bs, n_heads, qlen, dim_per_head)
+            k = shape(self.k_lin(input))  
+            v = shape(self.v_lin(input))  
         elif cache is None or self.layer_id not in cache:
             k = v = kv
-            k = shape(self.k_lin(k))  # (bs, n_heads, qlen, dim_per_head)
-            v = shape(self.v_lin(v))  # (bs, n_heads, qlen, dim_per_head)
+            k = shape(self.k_lin(k))  
+            v = shape(self.v_lin(v))   # (bs, n_heads, qlen, dim_per_head)
 
         if cache is not None:
             if self.layer_id in cache:
